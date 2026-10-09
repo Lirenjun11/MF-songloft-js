@@ -4,10 +4,10 @@
   "description": "MF插件",
   "author": "HW-RJ",
   "entryPath": "musicfree-adapter",
-  "main": "main.js",
+  "main": "main.jsc",
   "permissions": ["storage", "songs.read", "playlists.read", "jsenv", "fs", "inter-plugin"],
-  "updateUrl": "https://github.com/Lirenjun11/musicfree-songloft-js/raw/refs/heads/master/plugin.json",
-  "download_url": "https://github.com/Lirenjun11/musicfree-songloft-js/releases/download/v1.1.6/musicfree-adapter.jsplugin.zip",
+  "updateUrl": "https://github.com/Lirenjun11/MF-songloft-js/raw/refs/heads/master/plugin.json",
+  "download_url": "https://github.com/Lirenjun11/MF-songloft-js/releases/download/v1.1.6/musicfree-adapter.jsplugin.zip",
   "entryHash": "",
   "zipHash": ""
 }
