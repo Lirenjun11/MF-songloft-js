@@ -271,20 +271,29 @@
   var qualityStatus = document.getElementById('quality-status');
   var defaultQuality = 'standard';
 
+  // --- Settings: host player takeover ---
+  var hostTakeover = false;
+  var takeoverCheckbox = document.getElementById('host-takeover');
+  var takeoverStatus = document.getElementById('takeover-status');
+
   function loadSettings() {
     ajax('GET', '/settings', null, function (err, data) {
       if (err || !data) return;
       defaultQuality = data.defaultQuality || 'standard';
       qualitySelect.value = defaultQuality;
       gpQuality.value = defaultQuality;
+      hostTakeover = data.hostTakeover === true;
+      if (takeoverCheckbox) takeoverCheckbox.checked = hostTakeover;
+      syncHostStateOnLoad();
     });
   }
 
-  document.getElementById('save-quality-btn').addEventListener('click', function () {
+  qualitySelect.addEventListener('change', function () {
     var q = qualitySelect.value;
     ajax('PUT', '/settings', { defaultQuality: q }, function (err, data) {
       if (err || !data || !data.success) {
         qualityStatus.innerHTML = '<div class="message error-message">保存失败</div>';
+        setTimeout(function () { qualityStatus.innerHTML = ''; }, 3000);
         return;
       }
       defaultQuality = q;
@@ -293,6 +302,25 @@
       setTimeout(function () { qualityStatus.innerHTML = ''; }, 3000);
     });
   });
+
+  if (takeoverCheckbox) {
+    takeoverCheckbox.addEventListener('change', function () {
+      var on = takeoverCheckbox.checked;
+      ajax('PUT', '/settings', { hostTakeover: on }, function (err, data) {
+        if (err || !data || !data.success) {
+          takeoverCheckbox.checked = !on;
+          takeoverStatus.innerHTML = '<div class="message error-message">保存失败</div>';
+          setTimeout(function () { takeoverStatus.innerHTML = ''; }, 3000);
+          return;
+        }
+        hostTakeover = data.hostTakeover === true;
+        takeoverCheckbox.checked = hostTakeover;
+        takeoverStatus.innerHTML = '<div class="message success-message">宿主播放器接管已' + (hostTakeover ? '开启' : '关闭') + '</div>';
+        setTimeout(function () { takeoverStatus.innerHTML = ''; }, 3000);
+        if (!hostTakeover) deactivateHostSync();
+      });
+    });
+  }
 
   // 页面加载时加载设置
   loadSettings();
@@ -568,7 +596,7 @@
           html += '<div class="hot-song-item" onclick="searchHotSong(' + i + ')" title="点击搜索该歌曲">' +
             coverHtml +
             '<div class="hot-song-info">' +
-              '<div class="hot-song-title">' + escapeHtml(item.title) + '</div>' +
+              '<div class="hot-song-title">' + escapeHtml(item.title) + durationTag(item.duration) + '</div>' +
               '<div class="hot-song-artist">' + escapeHtml(artist) + '</div>' +
             '</div>' +
           '</div>';
@@ -872,6 +900,20 @@
     if (e.target === this) closePlaylistModal();
   });
 
+  // 时长小标签：数字秒或 "mm:ss" 字符串均兼容，无效/未知返回空串
+  function durationTag(sec) {
+    var s = Number(sec);
+    if (!isFinite(s) || s <= 0) {
+      if (typeof sec === 'string' && /^\d{1,2}:\d{1,2}(:\d{1,2})?$/.test(sec.trim())) {
+        var parts = sec.trim().split(':').map(Number);
+        s = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
+      } else return '';
+    }
+    s = Math.floor(s);
+    var m = Math.floor(s / 60), r = s % 60;
+    return '<span class="duration-tag">' + m + ':' + (r < 10 ? '0' : '') + r + '</span>';
+  }
+
   function renderSearchRows(items, startIdx) {
     var html = '';
     items.forEach(function (item, i) {
@@ -885,7 +927,7 @@
         : '<span class="song-cover-fallback">♫</span>';
       html += '<tr id="song-row-' + idx + '">' +
         '<td class="col-cover">' + coverHtml + '</td>' +
-        '<td><div class="cell-title">' + escapeHtml(item.title) + qTag + '</div>' +
+        '<td><div class="cell-title">' + escapeHtml(item.title) + qTag + durationTag(item.duration) + '</div>' +
           '<div class="cell-sub">' + escapeHtml(artist) + ' · ' + escapeHtml(item.platform) + '</div></td>' +
         '<td>' + escapeHtml(artist) + '</td>' +
         '<td class="col-platform">' + escapeHtml(item.platform) + '</td>' +
@@ -1070,9 +1112,9 @@
     });
   }
 
-  function updateLyric() {
+  function updateLyric(timeOverride) {
     if (lrcLines.length === 0) return;
-    var t = gpAudio.currentTime;
+    var t = typeof timeOverride === 'number' ? timeOverride : gpAudio.currentTime;
     var text = '';
     for (var i = lrcLines.length - 1; i >= 0; i--) {
       if (t >= lrcLines[i].time) {
@@ -1083,17 +1125,9 @@
     gpLyric.textContent = text || '';
   }
 
-  function resolveAndPlay(item, quality) {
+  // 内置 <audio> 播放（未开启接管或接管失败时的回退路径）
+  function playWithAudio(item, quality) {
     setStatus('解析中...');
-    player.classList.add('active');
-    gpTitle.textContent = item.title || '未知';
-    gpArtist.textContent = Array.isArray(item.artist) ? item.artist.join(', ') : (item.artist || '');
-    gpCover.src = item.artwork || '';
-    gpQuality.value = quality;
-    lrcLines = [];
-    gpLyric.textContent = '';
-    fetchLyric(item);
-
     ajax('POST', '/source', { musicItem: item, quality: quality }, function (err, data) {
       if (err || !data || !data.url) {
         setStatus((data && data.error) || '无法获取播放地址');
@@ -1107,6 +1141,179 @@
         p.catch(function () { setStatus('点击播放按钮开始'); });
       }
     });
+  }
+
+  // 宿主播放器接管：入库拿 songId 后调用宿主 player 播放
+  // 返回 true 表示已发起接管流程；宿主桥不可用时返回 false，由调用方回退内置播放
+  function tryHostTakeover(item, quality, cb) {
+    var sp = window.SongloftPlugin;
+    if (!sp || !sp.host || !sp.player) return false;
+    ajax('POST', '/api/host-takeover/play', { musicItem: item, quality: quality }, function (err, data) {
+      if (err || !data || !data.songId) { cb(false); return; }
+      var avail;
+      try {
+        avail = sp.host.isAvailable ? sp.host.isAvailable() : Promise.resolve(true);
+      } catch (e) { cb(false); return; }
+      Promise.resolve(avail).then(function (ok) {
+        if (!ok) { cb(false); return; }
+        return Promise.resolve(sp.player.setQueue([data.songId], { startIndex: 0 })).then(function () {
+          cb(true, data);
+        }, function () { cb(false); });
+      }, function () { cb(false); });
+    });
+    return true;
+  }
+
+  // --- 宿主接管模式：页面播放器条由宿主状态驱动（保持原有布局样式） ---
+  var hpPlayBtn = document.getElementById('gp-hp-play');
+  var hpCur = document.getElementById('gp-hp-cur');
+  var hpDur = document.getElementById('gp-hp-dur');
+  var hpSeek = document.getElementById('gp-hp-seek');
+  var hostbarEl = document.getElementById('gp-hostbar');
+  var hostStateOff = null;
+  var hostPollTimer = null;
+  var takeoverActive = false;
+  var takeoverSongId = null;
+  var seekingHost = false;
+
+  function fmtTime(s) {
+    s = Math.max(0, Math.floor(s || 0));
+    var m = Math.floor(s / 60), r = s % 60;
+    return m + ':' + (r < 10 ? '0' : '') + r;
+  }
+
+  function setTakeoverUI(on) {
+    if (hostbarEl) hostbarEl.style.display = on ? 'flex' : 'none';
+    gpAudio.style.display = on ? 'none' : '';
+    // 接管模式下播放器由宿主接管，音质在点击播放时已由解析结果确定，此处仅作状态展示
+    gpQuality.disabled = on;
+    gpQuality.title = on ? '宿主播放器接管中，音质由实际解析结果决定' : '音质';
+    if (!on) {
+      hpCur.textContent = '0:00';
+      hpDur.textContent = '0:00';
+      hpSeek.value = 0;
+      hpSeek.max = 0;
+      hpPlayBtn.textContent = '▶';
+    }
+  }
+
+  function applyHostState(s) {
+    if (!takeoverActive || !s) return;
+    var cs = s.current_song;
+    if (cs && takeoverSongId !== cs.id) {
+      // 用户在宿主侧切了歌：同步展示信息（歌词仅对插件发起的歌曲有效）
+      takeoverSongId = cs.id;
+      gpTitle.textContent = cs.title || '未知';
+      gpArtist.textContent = cs.artist || '';
+      gpCover.src = cs.cover_url || '';
+      lrcLines = [];
+      gpLyric.textContent = '';
+    }
+    var dur = s.duration || (cs && cs.duration) || 0;
+    hpDur.textContent = fmtTime(dur);
+    hpSeek.max = Math.max(0, Math.floor(dur));
+    if (!seekingHost) {
+      hpSeek.value = Math.floor(s.current_time || 0);
+      hpCur.textContent = fmtTime(s.current_time || 0);
+    }
+    hpPlayBtn.textContent = s.is_playing ? '❚❚' : '▶';
+    setStatus(s.is_playing ? '播放中' : '已暂停');
+    updateLyric(s.current_time || 0);
+  }
+
+  function stopHostSyncTimers() {
+    if (hostStateOff) { try { hostStateOff(); } catch (e) { /* ignore */ } hostStateOff = null; }
+    if (hostPollTimer) { clearInterval(hostPollTimer); hostPollTimer = null; }
+  }
+
+  function deactivateHostSync() {
+    takeoverActive = false;
+    stopHostSyncTimers();
+    setTakeoverUI(false);
+  }
+
+  function ensureHostSyncControls() {
+    if (hpPlayBtn.dataset.bound) return;
+    hpPlayBtn.dataset.bound = '1';
+    hpPlayBtn.addEventListener('click', function () {
+      var sp = window.SongloftPlugin;
+      if (sp && sp.player) Promise.resolve(sp.player.togglePlay()).catch(function () {});
+    });
+    hpSeek.addEventListener('input', function () {
+      seekingHost = true;
+      hpCur.textContent = fmtTime(hpSeek.value);
+    });
+    hpSeek.addEventListener('change', function () {
+      var sp = window.SongloftPlugin;
+      if (sp && sp.player) {
+        Promise.resolve(sp.player.seek(Number(hpSeek.value))).catch(function () {});
+      }
+      setTimeout(function () { seekingHost = false; }, 400);
+    });
+  }
+
+  function activateHostSync(songId) {
+    var sp = window.SongloftPlugin;
+    if (!sp || !sp.player) return;
+    takeoverActive = true;
+    takeoverSongId = songId;
+    ensureHostSyncControls();
+    setTakeoverUI(true);
+    stopHostSyncTimers();
+    try { hostStateOff = sp.player.onStateChange(applyHostState); } catch (e) { hostStateOff = null; }
+    // 兜底轮询：防止 onStateChange 在部分客户端版本上不推送进度
+    hostPollTimer = setInterval(function () {
+      if (!takeoverActive) return;
+      Promise.resolve(sp.player.getState()).then(applyHostState).catch(function () {});
+    }, 1000);
+    Promise.resolve(sp.player.getState()).then(applyHostState).catch(function () {});
+  }
+
+  // 打开插件页/进入设置页时，若宿主正在播放则自动进入接管态并同步播放状态
+  function syncHostStateOnLoad() {
+    if (!hostTakeover || takeoverActive) return;
+    if (!gpAudio.paused) return; // 本页内置播放器正在播放时不抢占
+    var sp = window.SongloftPlugin;
+    if (!sp || !sp.host || !sp.player) return;
+    var avail;
+    try { avail = sp.host.isAvailable ? sp.host.isAvailable() : true; } catch (e) { return; }
+    Promise.resolve(avail).then(function (ok) {
+      if (!ok) return;
+      return Promise.resolve(sp.player.getState()).then(function (s) {
+        if (takeoverActive || !s || !s.current_song) return;
+        player.classList.add('active');
+        // 传 null：首次状态回调会自行填充曲目信息并清空歌词
+        activateHostSync(null);
+      });
+    }).catch(function () { /* 宿主桥不可用或读取失败：保持内置播放器 */ });
+  }
+
+  function resolveAndPlay(item, quality) {
+    player.classList.add('active');
+    gpTitle.textContent = item.title || '未知';
+    gpArtist.textContent = Array.isArray(item.artist) ? item.artist.join(', ') : (item.artist || '');
+    gpCover.src = item.artwork || '';
+    gpQuality.value = quality;
+    lrcLines = [];
+    gpLyric.textContent = '';
+    fetchLyric(item);
+
+    if (hostTakeover && window.SongloftPlugin) {
+      setStatus('正在写入曲库...');
+      var attempted = tryHostTakeover(item, quality, function (ok, data) {
+        if (ok) {
+          gpQuality.value = (data && data.quality) || quality;
+          try { gpAudio.pause(); } catch (e) { /* ignore */ }
+          activateHostSync(data.songId);
+        } else {
+          deactivateHostSync();
+          setStatus('宿主播放器不可用，使用内置播放');
+          playWithAudio(item, quality);
+        }
+      });
+      if (attempted) return;
+    }
+    playWithAudio(item, quality);
   }
 
   gpAudio.addEventListener('timeupdate', updateLyric);
@@ -1198,9 +1405,11 @@
           platforms.push(g.platform);
         }
       });
+      // 保留上次选中的平台，避免重进页面/打开详情时回落到第一个
+      var activeRank = platforms.indexOf(currentRankPlatform) !== -1 ? currentRankPlatform : platforms[0];
       var tabsHtml = '';
       platforms.forEach(function (p) {
-        tabsHtml += '<span class="rank-tab' + (p === platforms[0] ? ' active' : '') + '" data-rank-platform="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>';
+        tabsHtml += '<span class="rank-tab' + (p === activeRank ? ' active' : '') + '" data-rank-platform="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>';
       });
       rankTabsEl.innerHTML = tabsHtml;
       Array.from(rankTabsEl.children).forEach(function (tab) {
@@ -1212,7 +1421,7 @@
           renderRankGroups(currentRankPlatform);
         });
       });
-      currentRankPlatform = platforms[0];
+      currentRankPlatform = activeRank;
       renderRankGroups(currentRankPlatform);
     });
   }
@@ -1306,7 +1515,7 @@
         html += '<tr id="rank-song-' + idx + '">' +
           '<td style="width:36px"><input type="checkbox" class="rank-song-cb" data-idx="' + idx + '" onchange="updateRankBatchBtn()" /></td>' +
           '<td class="col-cover">' + coverHtml + '</td>' +
-          '<td><div class="cell-title">' + escapeHtml(item.title) + qTag + '</div>' +
+          '<td><div class="cell-title">' + escapeHtml(item.title) + qTag + durationTag(item.duration) + '</div>' +
             '<div class="cell-sub">' + escapeHtml(artist) + ' · ' + escapeHtml(item.platform) + '</div></td>' +
           '<td>' + escapeHtml(artist) + '</td>' +
           '<td class="col-platform">' + escapeHtml(item.platform) + '</td>' +
@@ -1456,7 +1665,7 @@
           html += '<tr id="rank-song-' + idx + '">' +
             '<td style="width:36px"><input type="checkbox" class="rank-song-cb" data-idx="' + idx + '" onchange="updateRankBatchBtn()" checked /></td>' +
             '<td class="col-cover">' + coverHtml + '</td>' +
-            '<td><div class="cell-title">' + escapeHtml(item.title) + qTag + '</div>' +
+            '<td><div class="cell-title">' + escapeHtml(item.title) + qTag + durationTag(item.duration) + '</div>' +
               '<div class="cell-sub">' + escapeHtml(artist) + ' · ' + escapeHtml(item.platform) + '</div></td>' +
             '<td>' + escapeHtml(artist) + '</td>' +
             '<td class="col-platform">' + escapeHtml(item.platform) + '</td>' +
@@ -1694,9 +1903,11 @@
           platforms.push(g.platform);
         }
       });
+      // 保留上次选中的平台，避免重进页面/打开详情时回落到第一个
+      var activeHs = platforms.indexOf(currentHsPlatform) !== -1 ? currentHsPlatform : platforms[0];
       var tabsHtml = '';
       platforms.forEach(function (p) {
-        tabsHtml += '<span class="rank-tab' + (p === platforms[0] ? ' active' : '') + '" data-hs-platform="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>';
+        tabsHtml += '<span class="rank-tab' + (p === activeHs ? ' active' : '') + '" data-hs-platform="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>';
       });
       hsTagsEl.innerHTML = tabsHtml;
       Array.from(hsTagsEl.children).forEach(function (tab) {
@@ -1708,17 +1919,18 @@
           renderHsGroups(currentHsPlatform);
         });
       });
-      currentHsPlatform = platforms[0];
+      currentHsPlatform = activeHs;
       renderHsGroups(currentHsPlatform);
     });
   }
 
   window.openHotSheet = function (el) {
-    // 【新增1】：自动切换到“热门歌单”标签页以显示详情容器
-    switchTab('hotsheet');
+    // 已在“热门歌单”页时不再切换，否则会重载列表并覆盖详情（原 50ms 延时即为规避此问题）
+    var hsPageEl = document.querySelector('.tab-page[data-page="hotsheet"]');
+    var alreadyOnHs = !!(hsPageEl && hsPageEl.classList.contains('active'));
+    if (!alreadyOnHs) switchTab('hotsheet');
 
-    // 【新增2】：用 setTimeout 延迟 50ms，防止被 switchTab 自带的列表重置逻辑覆盖
-    setTimeout(function() {
+    var openHsDetail = function () {
       hsCtx.platform = el.getAttribute('data-platform');
       hsCtx.id = el.getAttribute('data-id');
       hsCtx.extraStr = el.getAttribute('data-extra') || '';
@@ -1750,7 +1962,10 @@
       hsDetailSongs.innerHTML = '<div class="empty-state">加载中...</div>';
       window._hsSongs = [];
       _loadHsPage(true);
-    }, 50);
+    };
+    // 页面未发生切换时立即打开详情，不需要等待列表重置
+    if (alreadyOnHs) openHsDetail();
+    else setTimeout(openHsDetail, 50);
   };
 
   function _loadHsPage(reset) {
@@ -1800,7 +2015,7 @@
         html += '<tr id="hs-song-' + idx + '">' +
           '<td style="width:36px"><input type="checkbox" class="hs-song-cb" data-idx="' + idx + '" onchange="updateHsBatchBtn()" /></td>' +
           '<td class="col-cover">' + coverHtml + '</td>' +
-          '<td><div class="cell-title">' + escapeHtml(item.title) + '</div>' +
+          '<td><div class="cell-title">' + escapeHtml(item.title) + durationTag(item.duration) + '</div>' +
             '<div class="cell-sub">' + escapeHtml(artist) + ' · ' + escapeHtml(item.platform) + '</div></td>' +
           '<td>' + escapeHtml(artist) + '</td>' +
           '<td class="col-platform">' + escapeHtml(item.platform) + '</td>' +
@@ -1919,7 +2134,7 @@
           html += '<tr id="hs-song-' + idx + '">' +
             '<td style="width:36px"><input type="checkbox" class="hs-song-cb" data-idx="' + idx + '" onchange="updateHsBatchBtn()" checked /></td>' +
             '<td class="col-cover">' + coverHtml + '</td>' +
-            '<td><div class="cell-title">' + escapeHtml(item.title) + '</div>' +
+            '<td><div class="cell-title">' + escapeHtml(item.title) + durationTag(item.duration) + '</div>' +
               '<div class="cell-sub">' + escapeHtml(artist) + ' · ' + escapeHtml(item.platform) + '</div></td>' +
             '<td>' + escapeHtml(artist) + '</td>' +
             '<td class="col-platform">' + escapeHtml(item.platform) + '</td>' +
@@ -2486,7 +2701,7 @@
       html += '<tr id="tp-row-' + idx + '">' +
         '<td style="width:36px"><input type="checkbox" class="tp-song-cb" data-idx="' + idx + '" onchange="onTpCbChange(' + idx + ', this.checked)" /></td>' +
         '<td class="col-cover">' + coverHtml + '</td>' +
-        '<td><div class="cell-title">' + escapeHtml(item.name || '未知') + '</div>' + subLine + '</td>' +
+        '<td><div class="cell-title">' + escapeHtml(item.name || '未知') + durationTag(item.duration) + '</div>' + subLine + '</td>' +
         '<td>' + escapeHtml(artist) + '</td>' +
         '<td class="col-op"><button class="btn btn-small btn-primary btn-play" onclick="playTpSong(' + idx + ', this)" style="margin-right:4px">播放</button><button class="btn btn-small btn-import" onclick="tpImportOne(' + idx + ', this)">导入</button></td></tr>';
     });

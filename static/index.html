@@ -152,20 +152,30 @@
     <section class="tab-page" data-page="settings">
       <div class="card">
         <h2>播放设置</h2>
-        <div class="form-row" style="align-items:center">
-          <label style="white-space:nowrap;font-size:14px">默认音质</label>
-          <select id="default-quality" class="form-control" style="flex:1">
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-name">默认音质</div>
+            <div class="setting-desc">播放时先尝试该音质，不可用则自动降级尝试更低音质，直至最低音质都失败才反馈播放失败</div>
+          </div>
+          <select id="default-quality" class="form-control">
             <option value="low">流畅 128k</option>
             <option value="standard" selected>标准 320k</option>
             <option value="high">高品 flac</option>
             <option value="super">超清 flac24</option>
           </select>
-          <button id="save-quality-btn" class="btn btn-primary">保存</button>
         </div>
-        <div id="quality-status" style="margin-top:8px"></div>
-        <p style="font-size:12px;color:var(--text-sub);margin:8px 0 0">
-          播放时先尝试默认音质，若该音质不可用则自动降级尝试更低音质，直至最低音质都失败才反馈播放失败。
-        </p>
+        <div id="quality-status"></div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-name">宿主播放器接管</div>
+            <div class="setting-desc">开启后点击播放将歌曲写入 Songloft 曲库并交由宿主播放器播放，页面播放器同步进度与控制；在浏览器独立打开时自动回退为内置播放</div>
+          </div>
+          <label class="switch">
+            <input id="host-takeover" type="checkbox" />
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+        <div id="takeover-status"></div>
       </div>
       <div class="card">
         <h2>外部搜索接口</h2>
@@ -242,6 +252,12 @@
       <option value="high">高品 flac</option>
       <option value="super">超清 flac24</option>
     </select>
+    <div id="gp-hostbar" style="display:none">
+      <button id="gp-hp-play" class="hp-btn" title="播放/暂停">▶</button>
+      <span id="gp-hp-cur" class="hp-time">0:00</span>
+      <input id="gp-hp-seek" type="range" min="0" max="0" value="0" step="1" />
+      <span id="gp-hp-dur" class="hp-time">0:00</span>
+    </div>
     <audio id="gp-audio" controls></audio>
     <span id="gp-status"></span>
   </div>

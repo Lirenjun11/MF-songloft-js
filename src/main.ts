@@ -741,6 +741,106 @@ router.post('/source', async (req) => {
   }
 });
 
+// ===== 宿主播放器接管：解析直链 → 写入 Songloft 曲库 → 返回 songId =====
+// 前端开启"宿主播放器接管"后调用；由宿主播放器播放入库后的歌曲。
+type TakeoverSongMap = Record<string, number>;
+
+async function getTakeoverMap(): Promise<TakeoverSongMap> {
+  try {
+    const raw = await songloft.storage.get('host_takeover_song_map');
+    const parsed = raw ? JSON.parse(String(raw)) : {};
+    return parsed && typeof parsed === 'object' ? parsed as TakeoverSongMap : {};
+  } catch { return {}; }
+}
+
+function takeoverKey(musicItem: any, platform: string): string {
+  const id = musicItem.id ?? musicItem.songmid ?? musicItem.hash ?? musicItem.copyrightId;
+  if (id !== undefined && id !== null && String(id) !== '') return `${platform}:${id}`;
+  const title = String(musicItem.title || '');
+  const artist = Array.isArray(musicItem.artist) ? musicItem.artist.join('/') : String(musicItem.artist || '');
+  return `${platform}:${title}:${artist}`;
+}
+
+router.post('/api/host-takeover/play', async (req) => {
+  try {
+    const body = await parseBody(req);
+    const musicItem = body.musicItem;
+    const quality = body.quality || 'standard';
+    if (!musicItem || typeof musicItem !== 'object') {
+      return jsonResponse({ error: 'musicItem is required' }, 400);
+    }
+    const platform = musicItem.platform;
+    if (!platform) {
+      return jsonResponse({ error: 'musicItem.platform is required' }, 400);
+    }
+    const plugin = Array.from(installedPlugins.values()).find(p => p.platform === platform);
+    if (!plugin || typeof plugin.getMediaSource !== 'function') {
+      return jsonResponse({ error: 'plugin not found or no getMediaSource' }, 404);
+    }
+
+    const source = await resolveMediaSourceWithFallback(plugin, musicItem as MusicItem, quality, platform);
+    if (!source || !source.url) return jsonResponse({ error: 'source_not_available' }, 404);
+
+    const title = String(musicItem.title || '未知歌曲');
+    const artist = Array.isArray(musicItem.artist) ? musicItem.artist.join(' / ') : String(musicItem.artist || '');
+    const album = String(musicItem.album || '');
+    const coverUrl = String(musicItem.artwork || musicItem.cover || musicItem.cover_url || '');
+    const duration = normalizeDuration(musicItem.duration);
+    const key = takeoverKey(musicItem, platform);
+
+    const songsApi = (songloft as any).songs;
+    if (!songsApi || typeof songsApi.create !== 'function') {
+      return jsonResponse({ error: 'host songs api unavailable' }, 500);
+    }
+
+    const map = await getTakeoverMap();
+    let songId: number | null = null;
+
+    // 已入库过：刷新直链后复用，避免重复堆积
+    const mappedId = map[key];
+    if (mappedId) {
+      try {
+        await songsApi.update(mappedId, {
+          url: source.url, title, artist, album, duration,
+          ...(coverUrl ? { coverUrl } : {}),
+        });
+        songId = mappedId;
+      } catch {
+        delete map[key]; // 歌曲可能已在曲库被删除，走重新创建
+      }
+    }
+    if (songId === null) {
+      const created = await songsApi.create([{
+        url: source.url,
+        title,
+        artist,
+        album,
+        ...(coverUrl ? { coverUrl } : {}),
+        ...(duration > 0 ? { duration } : {}),
+        sourceData: JSON.stringify(musicItem),
+        dedupKey: key,
+      }]);
+      songId = created && created[0] && created[0].id ? created[0].id : null;
+      if (songId !== null) map[key] = songId;
+    }
+    if (songId === null) return jsonResponse({ error: 'create song failed' }, 500);
+    try { await songloft.storage.set('host_takeover_song_map', JSON.stringify(map)); } catch { /* ignore */ }
+
+    return jsonResponse({
+      songId,
+      title,
+      artist,
+      album,
+      duration,
+      coverUrl,
+      url: source.url,
+      quality: (source as any).quality || quality,
+    });
+  } catch (error) {
+    return jsonResponse({ error: String(error) }, 500);
+  }
+});
+
 // Songloft 播放远程歌曲时回调插件解析播放地址（GET 或 POST）
 async function handleMusicUrl(req: HTTPRequest): Promise<HTTPResponse> {
   try {
@@ -843,7 +943,7 @@ router.get('/playlist/import', async (req) => {
         try {
           const songs = await withTimeout(plugin.importMusicSheet!(url), PLUGIN_TIMEOUT, `importMusicSheet[${plugin.platform}]`);
           if (songs) {
-            return songs.map(item => ({ ...item, platform: plugin.platform }));
+            return songs.map(item => ({ ...item, platform: plugin.platform, duration: normalizeDuration((item as any).duration) }));
           }
         } catch (error) {
           songloft.log.error(`Import failed for ${plugin.platform}: ${error}`);
@@ -868,7 +968,7 @@ router.get('/settings', async () => {
   try {
     const raw = await songloft.storage.get('adapter_settings');
     const settings = raw ? JSON.parse(String(raw)) : {};
-    return jsonResponse({ defaultQuality: settings.defaultQuality || 'standard' });
+    return jsonResponse({ defaultQuality: settings.defaultQuality || 'standard', hostTakeover: settings.hostTakeover === true });
   } catch (error) {
     return jsonResponse({ error: String(error) }, 500);
   }
@@ -877,15 +977,21 @@ router.get('/settings', async () => {
 router.put('/settings', async (req) => {
   try {
     const body = await parseBody(req);
-    const quality = body.defaultQuality;
-    if (quality && !['low', 'standard', 'high', 'super'].includes(quality)) {
-      return jsonResponse({ error: 'Invalid quality' }, 400);
-    }
     const raw = await songloft.storage.get('adapter_settings');
     const settings = raw ? JSON.parse(String(raw)) : {};
-    settings.defaultQuality = quality || 'standard';
+    // 字段独立更新：只写入请求中出现的数据，未传字段保持不变
+    if (body.defaultQuality !== undefined) {
+      const quality = body.defaultQuality;
+      if (quality && !['low', 'standard', 'high', 'super'].includes(quality)) {
+        return jsonResponse({ error: 'Invalid quality' }, 400);
+      }
+      settings.defaultQuality = quality || 'standard';
+    }
+    if (body.hostTakeover !== undefined) {
+      settings.hostTakeover = body.hostTakeover === true;
+    }
     await songloft.storage.set('adapter_settings', JSON.stringify(settings));
-    return jsonResponse({ success: true, defaultQuality: settings.defaultQuality });
+    return jsonResponse({ success: true, defaultQuality: settings.defaultQuality || 'standard', hostTakeover: settings.hostTakeover === true });
   } catch (error) {
     return jsonResponse({ error: String(error) }, 500);
   }
@@ -956,7 +1062,7 @@ router.get('/top-list-detail', async (req) => {
 
     return jsonResponse({
       isEnd: result.isEnd !== false,
-      songs: (result.musicList || []).map((s: any) => ({ ...s, platform })),
+      songs: (result.musicList || []).map((s: any) => ({ ...s, platform, duration: normalizeDuration(s.duration) })),
       sheetItem: result.sheetItem,
     });
   } catch (error) {
@@ -1151,7 +1257,7 @@ router.get('/recommend-sheets/detail', async (req) => {
 
     const allSongs = result.musicList;
     const hasMore = allSongs.length > pageSize;
-    const songs = allSongs.slice(0, pageSize).map((item: any) => ({ ...item, platform }));
+    const songs = allSongs.slice(0, pageSize).map((item: any) => ({ ...item, platform, duration: normalizeDuration(item.duration) }));
 
     return jsonResponse({
       isEnd: hasMore ? false : (result.isEnd !== false),
