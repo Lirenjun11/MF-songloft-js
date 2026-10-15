@@ -942,10 +942,11 @@
   function loadSearchPage() {
     if (searchState.loading || searchState.end) return;
     searchState.loading = true;
-    searchLoader.style.display = '';
 
     var requestId = searchState.requestId;
     var requestedPage = searchState.page;
+    // 首次加载时结果区已有「搜索中...」提示，仅翻页加载才显示底部「加载更多...」，避免两个提示叠在一起
+    searchLoader.style.display = requestedPage === 1 ? 'none' : '';
     var platformParam = searchState.platform ? '&platform=' + encodeURIComponent(searchState.platform) : '';
 
     // URL 中拼接 type 参数
@@ -1143,6 +1144,24 @@
     });
   }
 
+  // 把歌曲插到「当前播放的下一首」并立即播放；队列为空时退回整队替换
+  function enqueueNextAndPlay(sp, songId) {
+    return Promise.resolve(sp.player.getState()).then(function (st) {
+      var q = (st && st.queue) || [];
+      if (!q.length) return Promise.resolve(sp.player.setQueue([songId], { startIndex: 0 }));
+      // 已在队列中：直接切过去，避免重复堆积
+      for (var i = 0; i < q.length; i++) {
+        if (q[i] && q[i].id === songId) return Promise.resolve(sp.player.play(songId));
+      }
+      var cur = (st && typeof st.current_index === 'number' && st.current_index >= 0) ? st.current_index : q.length - 1;
+      return Promise.resolve(sp.player.insertToQueue(cur + 1, songId)).then(function () {
+        return sp.player.play(songId);
+      });
+    }, function () {
+      return sp.player.setQueue([songId], { startIndex: 0 });
+    });
+  }
+
   // 宿主播放器接管：入库拿 songId 后调用宿主 player 播放
   // 返回 true 表示已发起接管流程；宿主桥不可用时返回 false，由调用方回退内置播放
   function tryHostTakeover(item, quality, cb) {
@@ -1156,7 +1175,8 @@
       } catch (e) { cb(false); return; }
       Promise.resolve(avail).then(function (ok) {
         if (!ok) { cb(false); return; }
-        return Promise.resolve(sp.player.setQueue([data.songId], { startIndex: 0 })).then(function () {
+        return enqueueNextAndPlay(sp, data.songId).then(function () {
+          if (data.coverUrl) hostCoverMap[String(data.songId)] = data.coverUrl;
           cb(true, data);
         }, function () { cb(false); });
       }, function () { cb(false); });
@@ -1169,12 +1189,25 @@
   var hpCur = document.getElementById('gp-hp-cur');
   var hpDur = document.getElementById('gp-hp-dur');
   var hpSeek = document.getElementById('gp-hp-seek');
-  var hostbarEl = document.getElementById('gp-hostbar');
   var hostStateOff = null;
   var hostPollTimer = null;
   var takeoverActive = false;
   var takeoverSongId = null;
   var seekingHost = false;
+  var seekingLocal = false;
+  var hqBtn = document.getElementById('gp-hq-btn');
+  var hqPanelEl = document.getElementById('gp-hostqueue');
+  var hqListEl = document.getElementById('gp-hq-list');
+  var hqCountEl = document.getElementById('gp-hq-count');
+  var hqCloseEl = document.getElementById('gp-hq-close');
+  var hostQueue = [];
+  var hostQueueCur = -1;
+  var hostQueuePlaying = false;
+  var hostQueueSig = '';
+  // 宿主 songId → 插件入库时的原始封面地址（宿主 state 里的封面是认证接口，img 取不到）
+  var hostCoverMap = {};
+  var hostCoversLoading = false;
+  var lastHostState = null;
 
   function fmtTime(s) {
     s = Math.max(0, Math.floor(s || 0));
@@ -1182,30 +1215,81 @@
     return m + ':' + (r < 10 ? '0' : '') + r;
   }
 
+  // 取封面地址：宿主回传的 cover_url 指向曲库认证接口（/api/v1/songs/{id}/cover），
+  // <img> 带不上 Authorization 头，直接请求必然 401（"缺少认证信息"）。
+  // 优先用插件入库时记录的原始封面（公开地址），否则沿用页面其它宿主接口的做法，
+  // 把 localStorage 里的 access_token 拼进查询串，让同一 origin 的图片请求带上鉴权。
+  function hostCoverFor(song) {
+    if (!song) return '';
+    var mapped = hostCoverMap[String(song.id)];
+    if (mapped) return mapped;
+    var url = song.cover_url || '';
+    if (!url || /^(https?:)?\/\//.test(url)) return url;
+    return songloftApiUrl(url);
+  }
+
+  // 拉取插件侧封面兜底表；失败静默降级（没有兜底时回落宿主地址）
+  function loadHostCovers() {
+    if (hostCoversLoading) return;
+    hostCoversLoading = true;
+    ajax('GET', '/api/host-takeover/covers', null, function (err, data) {
+      hostCoversLoading = false;
+      if (err || !data || typeof data !== 'object') {
+        console.warn('[host-takeover] load covers failed', err);
+        return;
+      }
+      hostCoverMap = data;
+      hostQueueSig = ''; // 强制重渲染，让已有队列行用上兜底封面
+      renderHostQueue();
+      if (lastHostState && lastHostState.current_song) {
+        var c = hostCoverFor(lastHostState.current_song);
+        if (c) gpCover.src = c;
+      }
+    });
+  }
+
   function setTakeoverUI(on) {
-    if (hostbarEl) hostbarEl.style.display = on ? 'flex' : 'none';
-    gpAudio.style.display = on ? 'none' : '';
+    // 控制条 #gp-hostbar 常显（接管/内置播放共用一套样式），原生 audio 仅作引擎不显示
     // 接管模式下播放器由宿主接管，音质在点击播放时已由解析结果确定，此处仅作状态展示
     gpQuality.disabled = on;
     gpQuality.title = on ? '宿主播放器接管中，音质由实际解析结果决定' : '音质';
+    // ☰ 播放列表按钮仅在接管态有意义（列表来自宿主播放队列）
+    if (hqBtn) hqBtn.style.display = on ? '' : 'none';
     if (!on) {
-      hpCur.textContent = '0:00';
-      hpDur.textContent = '0:00';
-      hpSeek.value = 0;
-      hpSeek.max = 0;
-      hpPlayBtn.textContent = '▶';
+      syncLocalBarFromAudio();
+      hideHostQueue();
     }
   }
 
+  // 内置播放模式下，用 <audio> 的实际状态驱动控制条（接管模式下由宿主状态驱动）
+  function syncLocalBarFromAudio() {
+    if (takeoverActive) return;
+    var dur = gpAudio.duration || 0;
+    hpDur.textContent = fmtTime(dur);
+    hpSeek.max = Math.max(0, Math.floor(dur));
+    if (!seekingLocal) {
+      var t = gpAudio.currentTime || 0;
+      hpSeek.value = Math.floor(t);
+      hpCur.textContent = fmtTime(t);
+    }
+    hpPlayBtn.textContent = gpAudio.paused ? '▶' : '❚❚';
+  }
+  gpAudio.addEventListener('timeupdate', syncLocalBarFromAudio);
+  gpAudio.addEventListener('loadedmetadata', syncLocalBarFromAudio);
+  gpAudio.addEventListener('durationchange', syncLocalBarFromAudio);
+  gpAudio.addEventListener('play', syncLocalBarFromAudio);
+  gpAudio.addEventListener('pause', syncLocalBarFromAudio);
+
   function applyHostState(s) {
     if (!takeoverActive || !s) return;
+    lastHostState = s;
     var cs = s.current_song;
     if (cs && takeoverSongId !== cs.id) {
       // 用户在宿主侧切了歌：同步展示信息（歌词仅对插件发起的歌曲有效）
       takeoverSongId = cs.id;
       gpTitle.textContent = cs.title || '未知';
       gpArtist.textContent = cs.artist || '';
-      gpCover.src = cs.cover_url || '';
+      gpCover.src = hostCoverFor(cs);
       lrcLines = [];
       gpLyric.textContent = '';
     }
@@ -1219,6 +1303,16 @@
     hpPlayBtn.textContent = s.is_playing ? '❚❚' : '▶';
     setStatus(s.is_playing ? '播放中' : '已暂停');
     updateLyric(s.current_time || 0);
+    // 队列仅在内容/当前曲目/播放态变化时重建，避免每秒轮询重绘
+    var q = s.queue || [];
+    var sig = q.length + '|' + s.current_index + '|' + (cs ? cs.id : '') + '|' + (s.is_playing ? 1 : 0);
+    if (sig !== hostQueueSig) {
+      hostQueueSig = sig;
+      hostQueue = q;
+      hostQueueCur = typeof s.current_index === 'number' ? s.current_index : -1;
+      hostQueuePlaying = !!s.is_playing;
+      renderHostQueue();
+    }
   }
 
   function stopHostSyncTimers() {
@@ -1232,24 +1326,133 @@
     setTakeoverUI(false);
   }
 
+  // 面板开合统一走 .open 类：若改用内联 display，会覆盖样式表里的 flex 布局，
+  // 列表将失去可滚动高度（内容被裁掉且滚不动）
+  function openHostQueue() {
+    if (!hqPanelEl) return;
+    hqPanelEl.classList.add('open');
+    if (hqBtn) hqBtn.classList.add('active');
+    loadHostCovers();
+    renderHostQueue();
+    var sp = window.SongloftPlugin;
+    if (sp && sp.player) Promise.resolve(sp.player.getState()).then(applyHostState).catch(function () {});
+  }
+
+  function closeHostQueue() {
+    if (hqPanelEl) hqPanelEl.classList.remove('open');
+    if (hqBtn) hqBtn.classList.remove('active');
+  }
+
   function ensureHostSyncControls() {
     if (hpPlayBtn.dataset.bound) return;
     hpPlayBtn.dataset.bound = '1';
     hpPlayBtn.addEventListener('click', function () {
-      var sp = window.SongloftPlugin;
-      if (sp && sp.player) Promise.resolve(sp.player.togglePlay()).catch(function () {});
+      if (takeoverActive) {
+        var sp = window.SongloftPlugin;
+        if (sp && sp.player) Promise.resolve(sp.player.togglePlay()).catch(function () {});
+        return;
+      }
+      // 内置播放：直接驱动 <audio>
+      if (gpAudio.paused) {
+        var p = gpAudio.play();
+        if (p && p.catch) p.catch(function () { /* 自动播放被拦截时保持静默 */ });
+      } else {
+        gpAudio.pause();
+      }
     });
     hpSeek.addEventListener('input', function () {
-      seekingHost = true;
+      if (takeoverActive) seekingHost = true; else seekingLocal = true;
       hpCur.textContent = fmtTime(hpSeek.value);
     });
     hpSeek.addEventListener('change', function () {
-      var sp = window.SongloftPlugin;
-      if (sp && sp.player) {
-        Promise.resolve(sp.player.seek(Number(hpSeek.value))).catch(function () {});
+      if (takeoverActive) {
+        var sp = window.SongloftPlugin;
+        if (sp && sp.player) {
+          Promise.resolve(sp.player.seek(Number(hpSeek.value))).catch(function () {});
+        }
+      } else {
+        try { gpAudio.currentTime = Number(hpSeek.value); } catch (e) { /* 元数据未就绪时忽略 */ }
       }
-      setTimeout(function () { seekingHost = false; }, 400);
+      setTimeout(function () { seekingHost = false; seekingLocal = false; }, 400);
     });
+    if (hqBtn && hqPanelEl) {
+      hqBtn.addEventListener('click', function () {
+        if (hqPanelEl.classList.contains('open')) closeHostQueue();
+        else openHostQueue();
+      });
+    }
+    if (hqCloseEl) hqCloseEl.addEventListener('click', closeHostQueue);
+    // 点击面板与 ☰ 按钮以外的区域，或按 ESC，收起面板
+    document.addEventListener('click', function (e) {
+      if (!hqPanelEl || !hqPanelEl.classList.contains('open')) return;
+      var t = e.target;
+      if (t && t.closest && (t.closest('#gp-hostqueue') || t.closest('#gp-hq-btn'))) return;
+      closeHostQueue();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeHostQueue();
+    });
+    if (hqListEl) {
+      hqListEl.addEventListener('click', function (e) {
+        var t = e.target;
+        var del = t && t.closest ? t.closest('[data-hq-del]') : null;
+        if (del) {
+          e.stopPropagation();
+          var sp0 = window.SongloftPlugin;
+          var di = Number(del.getAttribute('data-hq-del'));
+          // 移除后下标整体位移，必须重新拉取宿主状态再渲染
+          if (sp0 && sp0.player) {
+            Promise.resolve(sp0.player.removeFromQueue(di)).then(function () {
+              return Promise.resolve(sp0.player.getState()).then(applyHostState);
+            }).catch(function () {});
+          }
+          return;
+        }
+        var row = t && t.closest ? t.closest('[data-hq-i]') : null;
+        if (!row) return;
+        var it = hostQueue[Number(row.getAttribute('data-hq-i'))];
+        if (!it) return;
+        var sp = window.SongloftPlugin;
+        if (sp && sp.player) Promise.resolve(sp.player.play(it.id)).catch(function () {});
+      });
+    }
+  }
+
+  function renderHostQueue() {
+    if (!hqListEl) return;
+    if (hqCountEl) hqCountEl.textContent = hostQueue.length ? hostQueue.length + ' 首' : '';
+    if (!hostQueue.length) {
+      hqListEl.innerHTML = '<div class="hq-empty">播放列表为空</div>';
+      return;
+    }
+    var html = '';
+    hostQueue.forEach(function (it, i) {
+      var cur = i === hostQueueCur;
+      // 加载失败只隐藏图片（保留元素），露出底层 ♪ 占位；下次重渲染会自动重试
+      var coverSrc = hostCoverFor(it);
+      var cover = coverSrc
+        ? '<img src="' + escapeHtml(coverSrc) + '" alt="" onerror="this.style.display=\'none\'" />'
+        : '';
+      html += '<div class="hq-item' + (cur ? ' current' : '') + (cur && hostQueuePlaying ? ' playing' : '') + '" data-hq-i="' + i + '">'
+        + '<div class="hq-cover">' + cover + '<span>♪</span>'
+        + '<span class="hq-eq"><i></i><i></i><i></i></span></div>'
+        + '<div class="hq-meta">'
+        + '<div class="hq-title">' + escapeHtml(it.title || '未知') + '</div>'
+        + '<div class="hq-artist">' + escapeHtml(it.artist || '未知歌手') + '</div>'
+        + '</div>'
+        + '<span class="hq-dur">' + (it.duration ? fmtTime(it.duration) : '') + '</span>'
+        + '<button class="hq-del" data-hq-del="' + i + '" title="从列表移除">✕</button>'
+        + '</div>';
+    });
+    hqListEl.innerHTML = html;
+  }
+
+  function hideHostQueue() {
+    closeHostQueue();
+    hostQueue = [];
+    hostQueueCur = -1;
+    hostQueuePlaying = false;
+    hostQueueSig = '';
   }
 
   function activateHostSync(songId) {
@@ -1259,6 +1462,7 @@
     takeoverSongId = songId;
     ensureHostSyncControls();
     setTakeoverUI(true);
+    loadHostCovers();
     stopHostSyncTimers();
     try { hostStateOff = sp.player.onStateChange(applyHostState); } catch (e) { hostStateOff = null; }
     // 兜底轮询：防止 onStateChange 在部分客户端版本上不推送进度
@@ -1317,6 +1521,9 @@
   }
 
   gpAudio.addEventListener('timeupdate', updateLyric);
+  // 控制条常显：无论是否接管，都要在启动时绑定一次控制条交互并进入内置播放态
+  ensureHostSyncControls();
+  setTakeoverUI(false);
 
   window.playSong = function (idx) {
     var item = lastResults[idx];
@@ -3011,7 +3218,7 @@
       gpTitle.textContent = playItem.title;
       gpArtist.textContent = playItem.artist;
       if (playItem.artwork) gpCover.src = playItem.artwork;
-      else if (match.cover_url) gpCover.src = match.cover_url;
+      else if (match.cover_url) gpCover.src = hostCoverFor(match);
       setStatus('播放中');
       gpAudio.src = data.data.url;
       var p2 = gpAudio.play();

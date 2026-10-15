@@ -743,7 +743,16 @@ router.post('/source', async (req) => {
 
 // ===== 宿主播放器接管：解析直链 → 写入 Songloft 曲库 → 返回 songId =====
 // 前端开启"宿主播放器接管"后调用；由宿主播放器播放入库后的歌曲。
-type TakeoverSongMap = Record<string, number>;
+// 宿主 state 回传的封面地址可能是空值或宿主本地路径，插件侧额外记录入库时的原始封面做兜底
+type TakeoverEntry = { songId: number; coverUrl?: string };
+type TakeoverSongMap = Record<string, TakeoverEntry | number>;
+
+// 兼容旧格式（value 为纯数字 songId）
+function takeoverEntry(value: TakeoverEntry | number | undefined): TakeoverEntry | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'number') return { songId: value, coverUrl: '' };
+  return { songId: Number(value.songId) || 0, coverUrl: value.coverUrl || '' };
+}
 
 async function getTakeoverMap(): Promise<TakeoverSongMap> {
   try {
@@ -794,17 +803,17 @@ router.post('/api/host-takeover/play', async (req) => {
     }
 
     const map = await getTakeoverMap();
+    const prev = takeoverEntry(map[key]);
     let songId: number | null = null;
 
     // 已入库过：刷新直链后复用，避免重复堆积
-    const mappedId = map[key];
-    if (mappedId) {
+    if (prev && prev.songId) {
       try {
-        await songsApi.update(mappedId, {
+        await songsApi.update(prev.songId, {
           url: source.url, title, artist, album, duration,
           ...(coverUrl ? { coverUrl } : {}),
         });
-        songId = mappedId;
+        songId = prev.songId;
       } catch {
         delete map[key]; // 歌曲可能已在曲库被删除，走重新创建
       }
@@ -821,9 +830,9 @@ router.post('/api/host-takeover/play', async (req) => {
         dedupKey: key,
       }]);
       songId = created && created[0] && created[0].id ? created[0].id : null;
-      if (songId !== null) map[key] = songId;
     }
     if (songId === null) return jsonResponse({ error: 'create song failed' }, 500);
+    map[key] = { songId, coverUrl: coverUrl || (prev ? prev.coverUrl || '' : '') };
     try { await songloft.storage.set('host_takeover_song_map', JSON.stringify(map)); } catch { /* ignore */ }
 
     return jsonResponse({
@@ -838,6 +847,22 @@ router.post('/api/host-takeover/play', async (req) => {
     });
   } catch (error) {
     return jsonResponse({ error: String(error) }, 500);
+  }
+});
+
+// 宿主播放列表封面兜底表：{ 宿主 songId: 插件入库时的原始封面地址 }
+// 宿主 state 里的封面可能为空或为宿主本地路径，前端用这里的地址补显示
+router.get('/api/host-takeover/covers', async () => {
+  try {
+    const map = await getTakeoverMap();
+    const covers: Record<string, string> = {};
+    for (const key of Object.keys(map)) {
+      const entry = takeoverEntry(map[key]);
+      if (entry && entry.songId && entry.coverUrl) covers[String(entry.songId)] = entry.coverUrl;
+    }
+    return jsonResponse(covers);
+  } catch (error) {
+    return jsonResponse({}, 200);
   }
 });
 

@@ -38,7 +38,6 @@
 
 <body>
   <nav class="navbar">
-    <div class="brand">MusicFree<span>Adapter</span></div>
     <div class="nav-tabs">
       <button class="nav-tab active" data-tab="home">首页</button>
       <button class="nav-tab" data-tab="rank">排行榜</button>
@@ -252,11 +251,20 @@
       <option value="high">高品 flac</option>
       <option value="super">超清 flac24</option>
     </select>
-    <div id="gp-hostbar" style="display:none">
+    <div id="gp-hostbar">
       <button id="gp-hp-play" class="hp-btn" title="播放/暂停">▶</button>
       <span id="gp-hp-cur" class="hp-time">0:00</span>
       <input id="gp-hp-seek" type="range" min="0" max="0" value="0" step="1" />
       <span id="gp-hp-dur" class="hp-time">0:00</span>
+      <button id="gp-hq-btn" class="hp-btn hp-btn-ghost" title="宿主播放列表">☰</button>
+    </div>
+    <div id="gp-hostqueue" class="host-queue">
+      <div class="hq-head">
+        <span class="hq-head-title">播放列表</span>
+        <span class="hq-head-sub" id="gp-hq-count"></span>
+        <button id="gp-hq-close" class="hq-close" title="收起">✕</button>
+      </div>
+      <div id="gp-hq-list" class="hq-list"></div>
     </div>
     <audio id="gp-audio" controls></audio>
     <span id="gp-status"></span>
