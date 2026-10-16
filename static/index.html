@@ -6,30 +6,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>MusicFree Adapter</title>
   <script>
-    // 主题跟随：在样式表加载前尽早应用 songloft 主题，避免闪白
+    // 主题跟随：宿主会在本页注入 common.js（先于本脚本执行），它会按宿主主题设置
+    // <html data-theme> 并下推 Material Design 3 令牌（--md-*）。故这里仅在宿主
+    // 尚未设定时，用系统偏好兜底，避免闪白；已设定则完全交给宿主。
     (function () {
       try {
-        var theme = 'light';
-        var keys = ['theme', 'songloft-theme', 'theme-mode', 'app-theme', 'color-theme', 'settings'];
-        for (var i = 0; i < keys.length; i++) {
-          var raw = localStorage.getItem(keys[i]);
-          if (!raw) continue;
-          var val = String(raw).toLowerCase();
-          if (val.charAt(0) === '{') {
-            try {
-              var obj = JSON.parse(raw);
-              var mode = String(obj.theme || obj.themeMode || obj.mode || obj.appearance || '').toLowerCase();
-              if (mode === 'dark' || mode === 'light') { theme = mode; break; }
-            } catch (e) {}
-          }
-          if (val.indexOf('dark') !== -1) { theme = 'dark'; break; }
-          if (val.indexOf('light') !== -1) { theme = 'light'; break; }
-        }
-        if (theme === 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-          theme = 'dark';
-        }
-        document.documentElement.setAttribute('data-theme', theme);
-        if (theme === 'dark') document.documentElement.classList.add('dark');
+        var de = document.documentElement;
+        if (de.getAttribute('data-theme')) return;
+        var theme = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+        de.setAttribute('data-theme', theme);
+        if (theme === 'dark') de.classList.add('dark');
       } catch (e) {}
     })();
   </script>
@@ -130,7 +116,7 @@
           </select>
           <input id="tp-url" type="text" placeholder="粘贴酷狗歌单链接或输入酷狗码（纯数字）" class="form-row-input tp-url-input" />
         </div>
-        <p id="tp-hint" class="hint" style="font-size:12px;color:var(--text-sub);margin:6px 0">支持酷狗概念版/标准版歌单链接，或直接输入酷狗码（纯数字）</p>
+        <p id="tp-hint" class="hint" style="font-size:calc(12px * var(--ui-scale, 1));color:var(--text-sub);margin:6px 0">支持酷狗概念版/标准版歌单链接，或直接输入酷狗码（纯数字）</p>
         <div class="btn-group" style="margin-top:10px">
           <button id="tp-parse-btn" class="btn btn-primary">解析歌单</button>
           <button id="tp-clear-btn" class="btn btn-secondary">清空</button>
@@ -177,19 +163,33 @@
         <div id="takeover-status"></div>
       </div>
       <div class="card">
+        <h2>外观设置</h2>
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-name">界面字号缩放</div>
+            <div class="setting-desc">按比例缩放插件页面的文字大小，用于与 Songloft 宿主界面字号保持协调（100% 为原始大小）</div>
+          </div>
+          <div class="ui-scale-control">
+            <input id="ui-scale" type="range" min="0.6" max="1.6" step="0.05" value="1" class="ui-scale-range" />
+            <span id="ui-scale-value" class="ui-scale-value">100%</span>
+          </div>
+        </div>
+        <div id="ui-scale-status"></div>
+      </div>
+      <div class="card">
         <h2>外部搜索接口</h2>
-        <p style="font-size:13px;color:var(--text-sub);margin:0 0 10px">供外部系统调用的标准化搜索接口，支持通过关键词搜索歌曲并返回播放地址。</p>
+        <p style="font-size:calc(13px * var(--ui-scale, 1));color:var(--text-sub);margin:0 0 10px">供外部系统调用的标准化搜索接口，支持通过关键词搜索歌曲并返回播放地址。</p>
         <div class="form-row" style="align-items:center">
-          <label style="white-space:nowrap;font-size:14px">请求方式</label>
-          <code id="external-method" style="background:var(--bg-secondary);padding:4px 10px;border-radius:var(--radius);font-size:14px">POST</code>
-          <label style="white-space:nowrap;font-size:14px;margin-left:16px">接口地址</label>
+          <label style="white-space:nowrap;font-size:calc(14px * var(--ui-scale, 1))">请求方式</label>
+          <code id="external-method" style="background:var(--bg-secondary);padding:4px 10px;border-radius:var(--radius);font-size:calc(14px * var(--ui-scale, 1))">POST</code>
+          <label style="white-space:nowrap;font-size:calc(14px * var(--ui-scale, 1));margin-left:16px">接口地址</label>
           <input id="external-endpoint" type="text" readonly class="form-row-input" onclick="this.select()" />
           <button class="btn btn-small" onclick="copyExternalEndpoint()">复制</button>
         </div>
         <div id="external-status" style="margin-top:8px"></div>
-        <details style="margin-top:10px;font-size:12px;color:var(--text-sub)">
+        <details style="margin-top:10px;font-size:calc(12px * var(--ui-scale, 1));color:var(--text-sub)">
           <summary style="cursor:pointer;user-select:none">请求 / 响应示例</summary>
-          <pre style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius);overflow-x:auto;margin:8px 0 0;line-height:1.5;font-size:12px"><code>{
+          <pre style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius);overflow-x:auto;margin:8px 0 0;line-height:1.5;font-size:calc(12px * var(--ui-scale, 1))"><code>{
   // 请求体
   "keyword": "歌曲名称",
   "hint": {
@@ -238,36 +238,97 @@
     </section>
   </div>
 
+  <!-- 底部播放条（形制对齐宿主 DesktopPlayer：顶栏细进度 + 左歌曲信息 / 中播放控制+时间 / 右工具栏） -->
   <div id="global-player">
-    <img id="gp-cover" alt="cover" />
-    <div id="gp-meta">
-      <div id="gp-title">未播放</div>
-      <div id="gp-artist"></div>
-    </div>
-    <div id="gp-lyric"></div>
-    <select id="gp-quality" title="音质">
-      <option value="low">流畅 128k</option>
-      <option value="standard" selected>标准 320k</option>
-      <option value="high">高品 flac</option>
-      <option value="super">超清 flac24</option>
-    </select>
-    <div id="gp-hostbar">
-      <button id="gp-hp-play" class="hp-btn" title="播放/暂停">▶</button>
-      <span id="gp-hp-cur" class="hp-time">0:00</span>
-      <input id="gp-hp-seek" type="range" min="0" max="0" value="0" step="1" />
-      <span id="gp-hp-dur" class="hp-time">0:00</span>
-      <button id="gp-hq-btn" class="hp-btn hp-btn-ghost" title="宿主播放列表">☰</button>
-    </div>
-    <div id="gp-hostqueue" class="host-queue">
-      <div class="hq-head">
-        <span class="hq-head-title">播放列表</span>
-        <span class="hq-head-sub" id="gp-hq-count"></span>
-        <button id="gp-hq-close" class="hq-close" title="收起">✕</button>
+    <input id="gp-hp-seek" type="range" min="0" max="0" value="0" step="1" />
+    <div class="gp-main">
+      <div class="gp-info">
+        <img id="gp-cover" alt="cover" />
+        <div id="gp-meta">
+          <div id="gp-title">未播放</div>
+          <div id="gp-artist"></div>
+        </div>
       </div>
-      <div id="gp-hq-list" class="hq-list"></div>
+      <div class="gp-controls">
+        <div class="gp-cc-row">
+          <button id="gpm-mode" class="hp-icon-btn gpm-only" title="播放模式"><span class="material-symbols-outlined">repeat</span></button>
+          <button id="gp-hp-prev" class="hp-btn" title="上一首"><span class="material-symbols-outlined">skip_previous</span></button>
+          <button id="gp-hp-play" class="hp-btn hp-btn-main" title="播放/暂停"><span class="material-symbols-outlined">play_arrow</span></button>
+          <button id="gp-hp-next" class="hp-btn" title="下一首"><span class="material-symbols-outlined">skip_next</span></button>
+        </div>
+        <div class="hp-times"><span id="gp-hp-cur">0:00</span><span id="gp-hp-dur">0:00</span></div>
+      </div>
+      <div class="gp-toolbar">
+        <button id="gp-hp-mode" class="hp-icon-btn" title="播放模式"><span class="material-symbols-outlined">repeat</span></button>
+        <div class="hp-vol">
+          <button id="gp-hp-vol-btn" class="hp-icon-btn" title="音量"><span class="material-symbols-outlined">volume_up</span></button>
+          <input id="gp-hp-vol" class="hp-vol-range" type="range" min="0" max="100" value="50" step="1" title="音量" />
+        </div>
+        <button id="ly-open-btn" class="hp-icon-btn" title="歌词"><span class="material-symbols-outlined">lyrics</span></button>
+        <button id="gp-hq-btn" class="hp-icon-btn" title="播放列表"><span class="material-symbols-outlined">queue_music</span></button>
+      </div>
     </div>
     <audio id="gp-audio" controls></audio>
-    <span id="gp-status"></span>
+  </div>
+
+  <!-- 播放模式浮层（播放条与全屏页共用；JS 按锚点定位，故挂到 body） -->
+  <div id="gp-mode-menu" class="hp-menu" role="menu">
+    <button class="hp-menu-item" data-mode="order"><span class="material-symbols-outlined">format_list_numbered</span><span>顺序播放</span></button>
+    <button class="hp-menu-item" data-mode="loop"><span class="material-symbols-outlined">repeat</span><span>列表循环</span></button>
+    <button class="hp-menu-item" data-mode="single"><span class="material-symbols-outlined">repeat_one</span><span>单曲循环</span></button>
+    <button class="hp-menu-item" data-mode="random"><span class="material-symbols-outlined">shuffle</span><span>随机播放</span></button>
+    <button class="hp-menu-item" data-mode="singlePlay"><span class="material-symbols-outlined">looks_one</span><span>播完停止</span></button>
+  </div>
+
+  <!-- 歌词页（全屏「正在播放」，点击播放器封面或歌词按钮打开；形制对齐宿主全屏播放器） -->
+  <div id="lyric-page" class="lyric-page">
+    <div class="ly-bg" id="ly-bg"></div>
+    <div class="ly-inner">
+      <div class="ly-head">
+        <button id="ly-close" class="ly-icon-btn" title="收起"><span class="material-symbols-outlined">keyboard_arrow_down</span></button>
+        <div class="ly-head-title">正在播放</div>
+        <span class="ly-src" id="ly-src"></span>
+      </div>
+      <div class="ly-body">
+        <div class="ly-left">
+          <div class="ly-cover-wrap"><img id="ly-cover" class="ly-cover" alt="cover" /></div>
+          <div class="ly-meta">
+            <div class="ly-title" id="ly-title">未播放</div>
+            <div class="ly-artist" id="ly-artist"></div>
+          </div>
+        </div>
+        <div class="ly-right">
+          <div class="ly-lines" id="ly-lines"><div class="ly-empty">暂无歌词</div></div>
+        </div>
+      </div>
+      <div class="ly-foot">
+        <div class="ly-progress">
+          <span id="ly-cur">0:00</span>
+          <input id="ly-seek" class="ly-seek" type="range" min="0" max="0" value="0" step="1" />
+          <span id="ly-dur">0:00</span>
+        </div>
+        <div class="ly-ctrl">
+          <button id="ly-prev" class="ly-icon-btn" title="上一首"><span class="material-symbols-outlined">skip_previous</span></button>
+          <button id="ly-play" class="ly-btn-main" title="播放/暂停"><span class="material-symbols-outlined">play_arrow</span></button>
+          <button id="ly-next" class="ly-icon-btn" title="下一首"><span class="material-symbols-outlined">skip_next</span></button>
+        </div>
+        <div class="ly-toolbar">
+          <button id="ly-mode" class="hp-icon-btn" title="播放模式"><span class="material-symbols-outlined">repeat</span></button>
+          <button id="ly-vol-btn" class="hp-icon-btn" title="音量"><span class="material-symbols-outlined">volume_up</span></button>
+          <button id="ly-hq-btn" class="hp-icon-btn" title="播放列表"><span class="material-symbols-outlined">queue_music</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 宿主播放列表面板（挂在 body 层，可浮于歌词页之上） -->
+  <div id="gp-hostqueue" class="host-queue">
+    <div class="hq-head">
+      <span class="hq-head-title">播放列表</span>
+      <span class="hq-head-sub" id="gp-hq-count"></span>
+      <button id="gp-hq-close" class="hq-close" title="收起"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div id="gp-hq-list" class="hq-list"></div>
   </div>
 
   <!-- 用户变量编辑弹窗 -->
@@ -297,7 +358,7 @@
         <button class="modal-close" onclick="closePlaylistModal()">&times;</button>
       </div>
       <div class="modal-body" id="playlist-modal-body">
-        <p style="margin:0 0 10px;font-size:13px;color:var(--text-sub)">将要导入的歌曲添加到哪个歌单？</p>
+        <p style="margin:0 0 10px;font-size:calc(13px * var(--ui-scale, 1));color:var(--text-sub)">将要导入的歌曲添加到哪个歌单？</p>
         <div id="playlist-list" style="max-height:300px;overflow-y:auto;margin-bottom:8px">
           <div class="empty-state">加载中...</div>
         </div>
@@ -317,8 +378,8 @@
     <div class="modal-content sub-modal-content">
       <div class="modal-header">
         <div>
-          <span style="font-size:15px;font-weight:600">订阅设置</span>
-          <p style="margin:2px 0 0;font-size:12px;color:var(--text-sub)">管理你的插件订阅源，保持插件自动更新</p>
+          <span style="font-size:calc(15px * var(--ui-scale, 1));font-weight:600">订阅设置</span>
+          <p style="margin:2px 0 0;font-size:calc(12px * var(--ui-scale, 1));color:var(--text-sub)">管理你的插件订阅源，保持插件自动更新</p>
         </div>
         <button class="modal-close" onclick="closeSubModal()">&times;</button>
       </div>
@@ -330,7 +391,7 @@
         </div>
         <div id="sub-list" style="margin-top:12px;max-height:320px;overflow-y:auto"></div>
         <div id="sub-update-progress" style="display:none;margin-top:12px">
-          <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
+          <div style="display:flex;justify-content:space-between;font-size:calc(13px * var(--ui-scale, 1));margin-bottom:4px">
             <span id="sub-update-text">正在更新...</span>
             <span id="sub-update-count">0/0</span>
           </div>
@@ -351,15 +412,15 @@
     <div class="modal-content sub-modal-content">
       <div class="modal-header">
         <div>
-          <span style="font-size:15px;font-weight:600">添加插件</span>
-          <p style="margin:2px 0 0;font-size:12px;color:var(--text-sub)">通过链接或本地 JS 文件安装 MusicFree 插件</p>
+          <span style="font-size:calc(15px * var(--ui-scale, 1));font-weight:600">添加插件</span>
+          <p style="margin:2px 0 0;font-size:calc(12px * var(--ui-scale, 1));color:var(--text-sub)">通过链接或本地 JS 文件安装 MusicFree 插件</p>
         </div>
         <button class="modal-close" onclick="closeAddPluginModal()">&times;</button>
       </div>
       <div class="modal-body">
         <!-- URL 安装 -->
         <div style="margin-bottom:16px">
-          <label style="display:block;font-size:13px;font-weight:600;margin-bottom:8px">通过链接安装</label>
+          <label style="display:block;font-size:calc(13px * var(--ui-scale, 1));font-weight:600;margin-bottom:8px">通过链接安装</label>
           <div class="form-row">
             <input id="plugin-url-input" type="text" placeholder="输入 MusicFree 插件 JS 文件的 URL" class="form-row-input" />
             <button id="plugin-url-btn" class="btn btn-primary" onclick="installFromUrl()">安装</button>
@@ -368,11 +429,11 @@
         <!-- 分隔线 -->
         <div style="position:relative;text-align:center;margin:14px 0">
           <hr style="border:none;border-top:1px solid var(--border);margin:0" />
-          <span style="position:absolute;top:-9px;left:50%;transform:translateX(-50%);background:var(--surface);padding:0 12px;font-size:12px;color:var(--text-sub)">或</span>
+          <span style="position:absolute;top:-9px;left:50%;transform:translateX(-50%);background:var(--surface);padding:0 12px;font-size:calc(12px * var(--ui-scale, 1));color:var(--text-sub)">或</span>
         </div>
         <!-- 文件上传 -->
         <div>
-          <label style="display:block;font-size:13px;font-weight:600;margin-bottom:8px">通过本地文件安装</label>
+          <label style="display:block;font-size:calc(13px * var(--ui-scale, 1));font-weight:600;margin-bottom:8px">通过本地文件安装</label>
           <div id="plugin-drop-zone" class="drop-zone">
             <input id="plugin-file-input" type="file" accept=".js,text/javascript" style="display:none" />
             <div class="drop-zone-inner">

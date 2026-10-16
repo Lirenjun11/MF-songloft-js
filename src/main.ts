@@ -989,11 +989,19 @@ router.get('/playlist/import', async (req) => {
   }
 });
 
+// 界面字号缩放系数：限制在 [0.6, 1.6]，非法值回落为 1
+function normalizeUiScale(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return 1;
+  const clamped = Math.min(1.6, Math.max(0.6, n));
+  return Math.round(clamped * 100) / 100;
+}
+
 router.get('/settings', async () => {
   try {
     const raw = await songloft.storage.get('adapter_settings');
     const settings = raw ? JSON.parse(String(raw)) : {};
-    return jsonResponse({ defaultQuality: settings.defaultQuality || 'standard', hostTakeover: settings.hostTakeover === true });
+    return jsonResponse({ defaultQuality: settings.defaultQuality || 'standard', hostTakeover: settings.hostTakeover === true, uiScale: normalizeUiScale(settings.uiScale) });
   } catch (error) {
     return jsonResponse({ error: String(error) }, 500);
   }
@@ -1015,8 +1023,11 @@ router.put('/settings', async (req) => {
     if (body.hostTakeover !== undefined) {
       settings.hostTakeover = body.hostTakeover === true;
     }
+    if (body.uiScale !== undefined) {
+      settings.uiScale = normalizeUiScale(body.uiScale);
+    }
     await songloft.storage.set('adapter_settings', JSON.stringify(settings));
-    return jsonResponse({ success: true, defaultQuality: settings.defaultQuality || 'standard', hostTakeover: settings.hostTakeover === true });
+    return jsonResponse({ success: true, defaultQuality: settings.defaultQuality || 'standard', hostTakeover: settings.hostTakeover === true, uiScale: normalizeUiScale(settings.uiScale) });
   } catch (error) {
     return jsonResponse({ error: String(error) }, 500);
   }
