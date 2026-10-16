@@ -6,7 +6,7 @@
   "entryPath": "musicfree-adapter",
   "main": "main.jsc",
   "permissions": ["storage", "songs.read", "songs.write", "playlists.read", "jsenv", "fs", "inter-plugin"],
-  "updateUrl": "https://github.com/Lirenjun11/MF-songloft-js/raw/refs/heads/master/plugin.json",
+  "updateUrl": "https://raw.githubusercontent.com/Lirenjun11/MF-songloft-js/refs/heads/master/plugin.json",
   "download_url": "https://github.com/Lirenjun11/MF-songloft-js/releases/download/v1.1.10/musicfree-adapter.jsplugin.zip",
   "entryHash": "",
   "zipHash": ""
